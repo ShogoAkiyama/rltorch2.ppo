@@ -7,19 +7,17 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from model.model import PPOModel
+from model import PPOModel
 from agent.storage import RolloutStorage
 from agent.utils import update_linear_schedule
 
 
-class PPO():
-    def __init__(self, envs, device, log_dir,
-                 max_num_steps, dataset_size, num_processes,
-                 recurrent_policy,
-                 clip_param, ppo_epoch, num_mini_batch,
-                 value_loss_coef, entropy_coef,
-                 lr=None, gamma=None, lambd=None,
-                 eps=None, max_grad_norm=None,
+class PPO:
+
+    def __init__(self, envs, device, log_dir, max_num_steps, dataset_size,
+                 num_processes, recurrent, clip_param, ppo_epoch,
+                 num_mini_batch, value_loss_coef, entropy_coef, lr=None,
+                 gamma=None, lambd=None, eps=None, max_grad_norm=None,
                  use_clipped_value_loss=True):
 
         self.device = device
@@ -45,7 +43,8 @@ class PPO():
         self.max_num_steps = max_num_steps
         self.dataset_size = dataset_size
         self.num_processes = num_processes
-        self.num_updates = int(self.max_num_steps) // self.dataset_size // self.num_processes
+        self.num_updates = \
+            int(self.max_num_steps) // self.dataset_size // self.num_processes
 
         self.rollouts = RolloutStorage(
             self.dataset_size, self.num_processes,
@@ -54,7 +53,7 @@ class PPO():
         self.episode_r = [[] for _ in range(num_processes)]
         self.episode_rewards = deque(maxlen=10)
 
-        self.recurrent = recurrent_policy
+        self.recurrent = recurrent
         self.lr = lr
         self.gamma = gamma
         self.lambd = lambd
@@ -83,7 +82,8 @@ class PPO():
             # experiments
             for _ in range(self.dataset_size):
                 with torch.no_grad():
-                    value, action, action_log_prob = self.online_network.act(states)
+                    value, action, action_log_prob = \
+                        self.online_network.act(states)
 
                 next_states, reward, done, infos = self.envs.step(action)
 
@@ -98,7 +98,8 @@ class PPO():
 
             # V(s_T)(129)
             with torch.no_grad():
-                next_value = self.online_network.get_value(next_states).detach()
+                next_value = \
+                    self.online_network.get_value(next_states).detach()
 
             self.rollouts.compute_returns(
                 next_value, self.gamma, self.lambd)
@@ -108,12 +109,15 @@ class PPO():
             self.rollouts.after_update()
 
             if len(self.episode_rewards) > 1:
-                total_num_steps = (step + 1) * self.num_processes * self.dataset_size
-                print("Updates {}, total_steps {}".format(step, total_num_steps))
-                print("mean/median/min/max reward {:.1f}/{:.1f}/{:.1f}/{:.1f}"
-                    .format(np.mean(self.episode_rewards), np.median(self.episode_rewards),
-                            np.min(self.episode_rewards), np.max(self.episode_rewards)))
-
+                total_num_steps = \
+                    (step + 1) * self.num_processes * self.dataset_size
+                r_mean = np.mean(self.episode_rewards)
+                r_median = np.median(self.episode_rewards)
+                r_min = np.min(self.episode_rewards)
+                r_max = np.max(self.episode_rewards)
+                print(f"Updates {step}, total_steps {total_num_steps}   "
+                      "mean/median/min/max reward   "
+                      f"{r_mean:.1f}/{r_median:.1f}/{r_min:.1f}/{r_max:.1f}")
                 self._writer.add_scalar(
                     'return/train', np.mean(self.episode_rewards),
                     total_num_steps)
@@ -126,7 +130,8 @@ class PPO():
             data_generator = rollouts.feed_forward_generator(all_advs)
 
             for sample in data_generator:
-                states,  actions, value_preds, vs_targets, log_probs_old, advs = sample
+                states, actions, value_preds, \
+                    vs_targets, log_probs_old, advs = sample
 
                 # Reshape to do in a single forward pass for all steps
                 values, action_log_probs, dist_entropy = \
@@ -134,13 +139,13 @@ class PPO():
 
                 ratio = torch.exp(action_log_probs - log_probs_old)
 
-                loss_policy = -torch.min(
-                    ratio * advs,
-                    torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advs
+                loss_policy = -torch.min(ratio * advs, torch.clamp(
+                    ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advs
                 ).mean()
 
-                value_pred_clipped = value_preds + \
-                    (values - value_preds).clamp(-self.clip_param, self.clip_param)
+                value_pred_clipped = value_preds + (
+                    values - value_preds
+                ).clamp(-self.clip_param, self.clip_param)
 
                 loss_value = 0.5 * torch.max(
                     (values - vs_targets).pow(2),
