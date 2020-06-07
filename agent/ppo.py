@@ -72,7 +72,7 @@ class PPO():
 
     def run(self):
         states = self.envs.reset()
-        self.rollouts.obs[0].copy_(states)
+        # self.rollouts.states[0].copy_(states)
         self.rollouts.to(self.device)
 
         for step in range(self.num_updates):
@@ -119,34 +119,32 @@ class PPO():
                     total_num_steps)
 
     def update(self, rollouts):
-        advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
+        all_advs = rollouts.vs_targets[:-1] - rollouts.value_preds[:-1]
+        all_advs = (all_advs - all_advs.mean()) / (all_advs.std() + 1e-5)
 
         for epoch in range(self.ppo_epoch):
-            data_generator = rollouts.feed_forward_generator(advantages)
+            data_generator = rollouts.feed_forward_generator(all_advs)
 
             for sample in data_generator:
-                obs_batch,  actions_batch, \
-                   value_preds_batch, return_batch, masks_batch, \
-                old_action_log_probs_batch, adv_targ = sample
+                states,  actions, value_preds, vs_targets, log_probs_old, advs = sample
 
                 # Reshape to do in a single forward pass for all steps
                 values, action_log_probs, dist_entropy = \
-                    self.online_network.evaluate_actions(obs_batch, actions_batch)
+                    self.online_network.evaluate_actions(states, actions)
 
-                ratio = torch.exp(action_log_probs - old_action_log_probs_batch)
+                ratio = torch.exp(action_log_probs - log_probs_old)
 
                 loss_policy = -torch.min(
-                    ratio * adv_targ,
-                    torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
+                    ratio * advs,
+                    torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advs
                 ).mean()
 
-                value_pred_clipped = value_preds_batch + \
-                    (values - value_preds_batch).clamp(-self.clip_param, self.clip_param)
+                value_pred_clipped = value_preds + \
+                    (values - value_preds).clamp(-self.clip_param, self.clip_param)
 
                 loss_value = 0.5 * torch.max(
-                    (values - return_batch).pow(2),
-                    (value_pred_clipped - return_batch).pow(2)
+                    (values - vs_targets).pow(2),
+                    (value_pred_clipped - vs_targets).pow(2)
                 ).mean()
 
                 self.optimizer.zero_grad()

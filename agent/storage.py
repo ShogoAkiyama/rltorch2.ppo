@@ -7,11 +7,11 @@ def _flatten_helper(T, N, _tensor):
 
 
 class RolloutStorage(object):
-    def __init__(self, num_steps, num_processes, num_mini_batch, obs_shape):
-        self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
+    def __init__(self, num_steps, num_processes, num_mini_batch, img_shape):
+        self.states = torch.zeros(num_steps + 1, num_processes, *img_shape)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
         self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
-        self.returns = torch.zeros(num_steps + 1, num_processes, 1)
+        self.vs_targets = torch.zeros(num_steps + 1, num_processes, 1)
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
         self.actions = torch.zeros(num_steps, num_processes, 1)
         self.actions = self.actions.long()
@@ -20,22 +20,22 @@ class RolloutStorage(object):
         self.num_steps = num_steps
         self.step = 0
 
-        self.img_shape = obs_shape
+        self.img_shape = img_shape
         self.batch_size = num_processes * num_steps
         self.mini_batch_size = self.batch_size // num_mini_batch
 
     def to(self, device):
-        self.obs = self.obs.to(device)
+        self.states = self.states.to(device)
         self.rewards = self.rewards.to(device)
         self.value_preds = self.value_preds.to(device)
-        self.returns = self.returns.to(device)
+        self.vs_targets = self.vs_targets.to(device)
         self.action_log_probs = self.action_log_probs.to(device)
         self.actions = self.actions.to(device)
         self.dones = self.dones.to(device)
 
-    def insert(self, obs, actions, action_log_probs,
+    def insert(self, states, actions, action_log_probs,
                value_preds, rewards, dones):
-        self.obs[self.step+1].copy_(obs)
+        self.states[self.step+1].copy_(states)
         self.actions[self.step].copy_(actions)
         self.action_log_probs[self.step].copy_(action_log_probs)
         self.value_preds[self.step].copy_(value_preds)
@@ -44,31 +44,29 @@ class RolloutStorage(object):
         self.step = (self.step+1) % self.num_steps
 
     def after_update(self):
-        self.obs[0].copy_(self.obs[-1])
+        self.states[0].copy_(self.states[-1])
         self.dones[0].copy_(self.dones[-1])
 
     def compute_returns(self, next_value, gamma, lambd):
         self.value_preds[-1] = next_value
         adv = 0
-        for step in reversed(range(self.rewards.size(0))):
+        for step in reversed(range(self.num_steps)):
             td_error = self.rewards[step] + \
                        gamma * self.value_preds[step+1] * (1 - self.dones[step+1]) -\
                        self.value_preds[step]
             adv = td_error + gamma * lambd * (1 - self.dones[step+1]) * adv
-            self.returns[step] = adv + self.value_preds[step]
+            self.vs_targets[step] = adv + self.value_preds[step]
 
     def feed_forward_generator(self, advantages):
         sampler = BatchSampler(
             SubsetRandomSampler(range(self.batch_size)), self.mini_batch_size, drop_last=True)
         for indices in sampler:
-            obs_batch = self.obs[:-1].view(-1, *self.img_shape)[indices]
+            states = self.states[:-1].view(-1, *self.img_shape)[indices]
 
-            actions_batch = self.actions.view(-1, self.actions.size(-1))[indices]
-            value_preds_batch = self.value_preds[:-1].view(-1, 1)[indices]
-            return_batch = self.returns[:-1].view(-1, 1)[indices]
-            dones_batch = self.dones[:-1].view(-1, 1)[indices]
-            old_action_log_probs_batch = self.action_log_probs.view(-1, 1)[indices]
-            adv_targ = advantages.view(-1, 1)[indices]
+            actions = self.actions.view(-1, self.actions.size(-1))[indices]
+            value_preds = self.value_preds[:-1].view(-1, 1)[indices]
+            vs_targets = self.vs_targets[:-1].view(-1, 1)[indices]
+            log_probs_old = self.action_log_probs.view(-1, 1)[indices]
+            advs = advantages.view(-1, 1)[indices]
 
-            yield obs_batch, actions_batch, value_preds_batch, \
-                  return_batch, dones_batch, old_action_log_probs_batch, adv_targ
+            yield states, actions, value_preds, vs_targets, log_probs_old, advs
