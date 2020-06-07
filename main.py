@@ -3,8 +3,8 @@ import argparse
 import torch
 from datetime import datetime
 
-from env import make_vec_envs
-from agent import PPO
+from rltorch2_ppo.env import make_vec_envs
+from rltorch2_ppo.agent import PPO
 
 
 def main(args):

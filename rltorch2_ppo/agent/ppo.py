@@ -7,9 +7,9 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-from model import PPOModel
-from agent.storage import RolloutStorage
-from agent.utils import update_linear_schedule
+from rltorch2_ppo.model import PPOModel
+from rltorch2_ppo.agent.storage import RolloutStorage
+from rltorch2_ppo.agent.utils import update_linear_schedule
 
 
 class PPO:
