@@ -1,9 +1,11 @@
 from collections import deque
 import numpy as np
+import os
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 
 from model.model import PPOModel
 from agent.storage import RolloutStorage
@@ -11,12 +13,12 @@ from agent.utils import update_linear_schedule
 
 
 class PPO():
-    def __init__(self, envs, device,
+    def __init__(self, envs, device, log_dir,
                  max_num_steps, dataset_size, num_processes,
                  recurrent_policy,
                  clip_param, ppo_epoch, num_mini_batch,
                  value_loss_coef, entropy_coef,
-                 lr=None, gamma=None, gae_lambda=None,
+                 lr=None, gamma=None, lambd=None,
                  eps=None, max_grad_norm=None,
                  use_clipped_value_loss=True):
 
@@ -55,7 +57,18 @@ class PPO():
         self.recurrent = recurrent_policy
         self.lr = lr
         self.gamma = gamma
-        self.gae_lambda = gae_lambda
+        self.lambd = lambd
+
+        # Prepare for logging.
+        self._log_dir = log_dir
+        self._model_dir = os.path.join(log_dir, 'model')
+        self._summary_dir = os.path.join(log_dir, 'summary')
+        if not os.path.exists(self._model_dir):
+            os.makedirs(self._model_dir)
+        if not os.path.exists(self._summary_dir):
+            os.makedirs(self._summary_dir)
+
+        self._writer = SummaryWriter(log_dir=self._summary_dir)
 
     def run(self):
         states = self.envs.reset()
@@ -88,7 +101,7 @@ class PPO():
                 next_value = self.online_network.get_value(next_states).detach()
 
             self.rollouts.compute_returns(
-                next_value, self.gamma, self.gae_lambda)
+                next_value, self.gamma, self.lambd)
 
             self.update(self.rollouts)
 
@@ -100,6 +113,10 @@ class PPO():
                 print("mean/median/min/max reward {:.1f}/{:.1f}/{:.1f}/{:.1f}"
                     .format(np.mean(self.episode_rewards), np.median(self.episode_rewards),
                             np.min(self.episode_rewards), np.max(self.episode_rewards)))
+
+                self._writer.add_scalar(
+                    'return/train', np.mean(self.episode_rewards),
+                    total_num_steps)
 
     def update(self, rollouts):
         advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]

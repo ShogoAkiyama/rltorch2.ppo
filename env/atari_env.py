@@ -34,17 +34,15 @@ class TransposeImage(TransposeObs):
         return ob.transpose(self.op[0], self.op[1], self.op[2])
 
 
-def make_env(env_id, seed, rank, log_dir, allow_early_resets):
+def make_env(env_id, seed, rank, allow_early_resets):
     def _thunk():
 
         env = make_atari(env_id)
 
         env.seed(seed + rank)
 
-        if log_dir is not None:
-            env = Monitor(
-                env, os.path.join(log_dir, str(rank)),
-                allow_early_resets=allow_early_resets)
+        # if log_dir is not None:
+        env = Monitor(env, allow_early_resets=allow_early_resets)
 
         env = wrap_deepmind(env)
 

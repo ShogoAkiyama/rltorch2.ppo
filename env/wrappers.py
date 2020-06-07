@@ -331,7 +331,7 @@ def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, 
 
 class Monitor(Wrapper):
 
-    def __init__(self, env, filename, allow_early_resets=False, reset_keywords=(), info_keywords=()):
+    def __init__(self, env, allow_early_resets=False, reset_keywords=(), info_keywords=()):
         Wrapper.__init__(self, env=env)
         self.tstart = time.time()
         self.results_writer = None

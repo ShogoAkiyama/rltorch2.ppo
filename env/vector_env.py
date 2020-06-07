@@ -9,10 +9,10 @@ from .atari_env import make_env
 
 
 def make_vec_envs(env_name, seed, num_processes,
-                  log_dir, device,
+                  device,
                   allow_early_resets):
     envs = [
-        make_env(env_name, seed, i, log_dir, allow_early_resets)
+        make_env(env_name, seed, i, allow_early_resets)
         for i in range(num_processes)]
 
     envs = ShmemVecEnv(envs, context='fork')

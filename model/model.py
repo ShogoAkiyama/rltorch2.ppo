@@ -10,16 +10,13 @@ class Flatten(nn.Module):
 
 
 class PPOModel(nn.Module):
-    def __init__(self, obs_shape, action_space):
+    def __init__(self, img_shape, action_space):
         super(PPOModel, self).__init__()
 
-        self.base = CNNBase(obs_shape[0])
+        self.base = CNNBase(img_shape[0])
 
-        if action_space.__class__.__name__ == "Discrete":
-            num_outputs = action_space.n
-            self.dist = Categorical(self.base.output_size, num_outputs)
-        else:
-            raise NotImplementedError
+        num_outputs = action_space.n
+        self.dist = Categorical(self.base.output_size, num_outputs)
 
     @property
     def recurrent_hidden_state_size(self):
