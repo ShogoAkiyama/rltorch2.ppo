@@ -1,6 +1,6 @@
 from functools import partial
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 def init_fn(m, gain=1):
@@ -17,20 +17,11 @@ class Flatten(nn.Module):
 class PPOModel(nn.Module):
     def __init__(self, img_shape, action_space):
         super(PPOModel, self).__init__()
-
         self.base = CNNBase(img_shape[0])
         self.dist = Categorical(self.base.output_size, action_space.n)
 
-    @property
-    def recurrent_hidden_state_size(self):
-        """Size of rnn_hx."""
-        return self.base.recurrent_hidden_state_size
-
-    def forward(self, inputs, rnn_hxs, masks):
-        raise NotImplementedError
-
-    def act(self, inputs, deterministic=False):
-        value, actor_features = self.base(inputs)
+    def forward(self, states, deterministic=False):
+        value, actor_features = self.base(states)
         dist = self.dist(actor_features)
 
         if deterministic:
@@ -42,12 +33,12 @@ class PPOModel(nn.Module):
 
         return value, action, action_log_probs
 
-    def get_value(self, inputs):
-        value, _ = self.base(inputs)
+    def calculate_value(self, states):
+        value, _ = self.base(states)
         return value
 
-    def evaluate_actions(self, inputs, action):
-        value, actor_features = self.base(inputs)
+    def evaluate_actions(self, states, action):
+        value, actor_features = self.base(states)
         dist = self.dist(actor_features)
 
         action_log_probs = dist.log_probs(action)
@@ -82,7 +73,6 @@ class CNNBase(nn.Module):
 
     def forward(self, inputs):
         x = self.main(inputs / 255.0)
-
         return self.critic_linear(x), x
 
 
