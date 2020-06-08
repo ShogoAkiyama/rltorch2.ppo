@@ -1,4 +1,3 @@
-import os
 import gym
 from gym.spaces.box import Box
 
