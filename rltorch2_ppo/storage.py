@@ -24,7 +24,7 @@ class RolloutStorage(object):
             unroll_length + 1, num_processes, 1, device=device)
         # Target estimate of V(s_t) based on rollouts.
         self.target_values = torch.zeros(
-            unroll_length + 1, num_processes, 1, device=device)
+            unroll_length, num_processes, 1, device=device)
 
         self.step = 0
         self.unroll_length = unroll_length
@@ -68,7 +68,7 @@ class RolloutStorage(object):
         assert self._is_ready
 
         # Calculate advantages.
-        all_advs = self.target_values[:-1] - self.pred_values[:-1]
+        all_advs = self.target_values - self.pred_values[:-1]
         all_advs = (all_advs - all_advs.mean()) / (all_advs.std() + 1e-5)
 
         for _ in range(num_gradient_steps):
