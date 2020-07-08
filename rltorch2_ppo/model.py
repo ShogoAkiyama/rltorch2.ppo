@@ -2,6 +2,7 @@ from functools import partial
 import torch
 from torch import nn
 
+from rltorch2_ppo.network import ImpalaCNNBody
 
 def init_fn(m, gain=1):
     if isinstance(m, nn.Linear) or isinstance(m, nn.Conv2d):
@@ -17,8 +18,10 @@ class Flatten(nn.Module):
 class PPOModel(nn.Module):
     def __init__(self, img_shape, action_space):
         super(PPOModel, self).__init__()
-        self.base = CNNBase(img_shape[0])
-        self.dist = Categorical(self.base.output_size, action_space.n)
+        # self.base = CNNBase(img_shape[0])
+        self.base = ImpalaCNNBody(
+            img_shape[0])
+        self.dist = Categorical(self.base.output_size, 15)
 
     def forward(self, states, deterministic=False):
         value, actor_features = self.base(states)
@@ -61,19 +64,36 @@ class CNNBase(nn.Module):
             nn.Conv2d(64, 32, 3, stride=1),
             nn.ReLU(),
             Flatten(),
-            nn.Linear(32 * 7 * 7, hidden_size),
+            nn.Linear(32 * 4 * 4, hidden_size),
             nn.ReLU()
         ).apply(partial(init_fn, gain=nn.init.calculate_gain('relu')))
 
-        self.critic_linear = nn.Linear(hidden_size, 1).apply(init_fn)
+        # self.critic_linear = nn.Linear(hidden_size, 1).apply(init_fn)
+
+        Nb = 50
+        self.critic_linear = nn.Linear(hidden_size, Nb).apply(init_fn)
+        self.cluster_linear = nn.Linear(Nb, Nb).apply(init_fn)
+        self.softmax = nn.Softmax(dim=1)
+        self.mu_linear = nn.Linear(Nb, Nb).apply(init_fn)
 
     @property
     def output_size(self):
         return self._hidden_size
 
+    # def forward(self, inputs):
+    #     x = self.main(inputs / 255.0)
+    #     return self.critic_linear(x), x
+
     def forward(self, inputs):
         x = self.main(inputs / 255.0)
-        return self.critic_linear(x), x
+        y = self.critic_linear(x)
+        a = self.cluster_linear(y)
+        a = self.softmax(a)
+        mu = self.mu_linear(y)
+
+        value = (a * mu).sum(axis=1).unsqueeze(1)
+
+        return value, x
 
 
 class FixedCategorical(torch.distributions.Categorical):

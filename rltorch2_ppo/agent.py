@@ -74,20 +74,23 @@ class PPO:
     def run(self):
         states = self.envs.reset()
         self.storage.init_states(states)
-
+        episodes = np.zeros(self.num_processes)
         for step in range(self.num_updates):
             # Decrease learning rate linearly.
-            update_linear_schedule(
-                self.optimizer, step, self.num_updates, self.lr)
+            # update_linear_schedule(
+            #     self.optimizer, step, self.num_updates, self.lr)
 
             for _ in range(self.unroll_length):
                 with torch.no_grad():
                     values, actions, action_log_probs = self.network(states)
                 next_states, rewards, dones, infos = self.envs.step(actions)
 
-                for info in infos:
-                    if 'episode' in info.keys():
-                        self.episode_rewards.append(info['episode']['r'])
+                episodes += rewards.cpu().numpy().reshape(-1)
+
+                for i, done in enumerate(dones.cpu().detach().numpy()):
+                    if done:
+                        self.episode_rewards.append(episodes[i])
+                        episodes[i] = 0
 
                 self.storage.insert(
                     next_states, actions, rewards, dones, action_log_probs,
@@ -100,7 +103,6 @@ class PPO:
 
             self.storage.end_rollout(next_values)
             self.update()
-
             if len(self.episode_rewards) > 1:
                 total_steps = \
                     (step + 1) * self.num_processes * self.unroll_length

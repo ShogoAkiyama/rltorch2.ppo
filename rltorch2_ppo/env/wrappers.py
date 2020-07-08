@@ -1,392 +1,359 @@
-import numpy as np
-from collections import deque
+from abc import ABC, abstractmethod
 import gym
-from gym import spaces
-from gym.core import Wrapper
-import time
-import cv2
-
-cv2.ocl.setUseOpenCL(False)
+from gym.spaces.box import Box
+import numpy as np
+import torch
 
 
-class TimeLimit(gym.Wrapper):
-    def __init__(self, env, max_episode_steps=None):
-        super(TimeLimit, self).__init__(env)
-        self._max_episode_steps = max_episode_steps
-        self._elapsed_steps = 0
-
-    def step(self, ac):
-        observation, reward, done, info = self.env.step(ac)
-        self._elapsed_steps += 1
-        if self._elapsed_steps >= self._max_episode_steps:
-            done = True
-            info['TimeLimit.truncated'] = True
-        return observation, reward, done, info
-
-    def reset(self, **kwargs):
-        self._elapsed_steps = 0
-        return self.env.reset(**kwargs)
+def tile_images(nhwc):
+    nhwc = np.asarray(nhwc)
+    N, h, w, c = nhwc.shape
+    H = int(np.ceil(np.sqrt(N)))
+    W = int(np.ceil(float(N)/H))
+    nhwc = np.array(list(nhwc) + [nhwc[0]*0 for _ in range(N, H*W)])
+    HWhwc = np.reshape(nhwc, (H, W, h, w, c))
+    HhWwc = HWhwc.transpose(0, 2, 1, 3, 4)
+    Hh_Ww_c = np.reshape(HhWwc, (H*h, W*w, c))
+    return Hh_Ww_c
 
 
-class ClipActionsWrapper(gym.Wrapper):
-    def step(self, action):
-        import numpy as np
-        action = np.nan_to_num(action)
-        action = np.clip(action, self.action_space.low, self.action_space.high)
-        return self.env.step(action)
+class VecEnv(ABC):
+    closed = False
+    viewer = None
 
-    def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
+    metadata = {
+        'render.modes': ['human', 'rgb_array']
+    }
 
+    def __init__(self, num_envs, observation_space, action_space):
+        self.num_envs = num_envs
+        self.observation_space = observation_space
+        self.action_space = action_space
 
-class NoopResetEnv(gym.Wrapper):
-    def __init__(self, env, noop_max=30):
-        """Sample initial states by taking random number of no-ops on reset.
-        No-op is assumed to be action 0.
-        """
-        gym.Wrapper.__init__(self, env)
-        self.noop_max = noop_max
-        self.override_num_noops = None
-        self.noop_action = 0
-        assert env.unwrapped.get_action_meanings()[0] == 'NOOP'
-
-    def reset(self, **kwargs):
-        """ Do no-op action for a number of steps in [1, noop_max]."""
-        self.env.reset(**kwargs)
-        if self.override_num_noops is not None:
-            noops = self.override_num_noops
-        else:
-            noops = self.unwrapped.np_random.randint(1, self.noop_max + 1)
-        assert noops > 0
-        obs = None
-        for _ in range(noops):
-            obs, _, done, _ = self.env.step(self.noop_action)
-            if done:
-                obs = self.env.reset(**kwargs)
-        return obs
-
-    def step(self, ac):
-        return self.env.step(ac)
-
-
-class FireResetEnv(gym.Wrapper):
-    def __init__(self, env):
-        gym.Wrapper.__init__(self, env)
-        assert env.unwrapped.get_action_meanings()[1] == 'FIRE'
-        assert len(env.unwrapped.get_action_meanings()) >= 3
-
-    def reset(self, **kwargs):
-        self.env.reset(**kwargs)
-        obs, _, done, _ = self.env.step(1)
-        if done:
-            self.env.reset(**kwargs)
-        obs, _, done, _ = self.env.step(2)
-        if done:
-            self.env.reset(**kwargs)
-        return obs
-
-    def step(self, ac):
-        return self.env.step(ac)
-
-
-class EpisodicLifeEnv(gym.Wrapper):
-    def __init__(self, env):
-        """Make end-of-life == end-of-episode, but only reset on true game over.
-        Done by DeepMind for the DQN and co. since it helps value estimation.
-        """
-        gym.Wrapper.__init__(self, env)
-        self.lives = 0
-        self.was_real_done = True
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self.was_real_done = done
-        # check current lives, make loss of life terminal,
-        # then update lives to handle bonus lives
-        lives = self.env.unwrapped.ale.lives()
-        if lives < self.lives and lives > 0:
-            # for Qbert sometimes we stay in lives == 0 condition for a few
-            # frames so it's important to keep lives > 0, so that we only
-            # reset once the environment advertises done.
-            done = True
-        self.lives = lives
-        return obs, reward, done, info
-
-    def reset(self, **kwargs):
-        """Reset only when lives are exhausted.
-        This way all states are still reachable even though lives are episodic,
-        and the learner need not know about any of this behind-the-scenes.
-        """
-        if self.was_real_done:
-            obs = self.env.reset(**kwargs)
-        else:
-            # no-op step to advance from terminal/lost life state
-            obs, _, _, _ = self.env.step(0)
-        self.lives = self.env.unwrapped.ale.lives()
-        return obs
-
-
-class MaxAndSkipEnv(gym.Wrapper):
-    def __init__(self, env, skip=4):
-        """Return only every `skip`-th frame"""
-        gym.Wrapper.__init__(self, env)
-        # most recent raw observations (for max pooling across time steps)
-        self._obs_buffer = np.zeros(
-            (2,) + env.observation_space.shape, dtype=np.uint8)
-        self._skip = skip
-
-    def step(self, action):
-        """Repeat action, sum reward, and max over last observations."""
-        total_reward = 0.0
-        done = None
-        for i in range(self._skip):
-            obs, reward, done, info = self.env.step(action)
-            if i == self._skip - 2:
-                self._obs_buffer[0] = obs
-            if i == self._skip - 1:
-                self._obs_buffer[1] = obs
-            total_reward += reward
-            if done:
-                break
-        # Note that the observation on the done=True frame
-        # doesn't matter
-        max_frame = self._obs_buffer.max(axis=0)
-
-        return max_frame, total_reward, done, info
-
-    def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
-
-
-class ClipRewardEnv(gym.RewardWrapper):
-    def __init__(self, env):
-        gym.RewardWrapper.__init__(self, env)
-
-    def reward(self, reward):
-        """Bin reward to {+1, 0, -1} by its sign."""
-        return np.sign(reward)
-
-
-class WarpFrame(gym.ObservationWrapper):
-    def __init__(self, env, width=84, height=84, grayscale=True,
-                 dict_space_key=None):
-        super().__init__(env)
-        self._width = width
-        self._height = height
-        self._grayscale = grayscale
-        self._key = dict_space_key
-        if self._grayscale:
-            num_colors = 1
-        else:
-            num_colors = 3
-
-        new_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(self._height, self._width, num_colors),
-            dtype=np.uint8,
-        )
-        if self._key is None:
-            original_space = self.observation_space
-            self.observation_space = new_space
-        else:
-            original_space = self.observation_space.spaces[self._key]
-            self.observation_space.spaces[self._key] = new_space
-        assert original_space.dtype == np.uint8 \
-            and len(original_space.shape) == 3
-
-    def observation(self, obs):
-        if self._key is None:
-            frame = obs
-        else:
-            frame = obs[self._key]
-
-        if self._grayscale:
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        frame = cv2.resize(
-            frame, (self._width, self._height), interpolation=cv2.INTER_AREA
-        )
-        if self._grayscale:
-            frame = np.expand_dims(frame, -1)
-
-        if self._key is None:
-            obs = frame
-        else:
-            obs = obs.copy()
-            obs[self._key] = frame
-        return obs
-
-
-class FrameStack(gym.Wrapper):
-    def __init__(self, env, k):
-        """Stack k last frames.
-
-        Returns lazy array, which is much more memory efficient.
-
-        See Also
-        --------
-        baselines.common.atari_wrappers.LazyFrames
-        """
-        gym.Wrapper.__init__(self, env)
-        self.k = k
-        self.frames = deque([], maxlen=k)
-        shp = env.observation_space.shape
-        self.observation_space = spaces.Box(
-            low=0, high=255, shape=(shp[:-1] + (shp[-1] * k,)),
-            dtype=env.observation_space.dtype)
-
+    @abstractmethod
     def reset(self):
-        ob = self.env.reset()
-        for _ in range(self.k):
-            self.frames.append(ob)
-        return self._get_ob()
+        """
+        Reset all the environments and return an array of
+        observations, or a dict of observation arrays.
+        If step_async is still doing work, that work will
+        be cancelled and step_wait() should not be called
+        until step_async() is invoked again.
+        """
+        pass
 
-    def step(self, action):
-        ob, reward, done, info = self.env.step(action)
-        self.frames.append(ob)
-        return self._get_ob(), reward, done, info
+    @abstractmethod
+    def step_async(self, actions):
+        """
+        Tell all the environments to start taking a step
+        with the given actions.
+        Call step_wait() to get the results of the step.
+        You should not call this if a step_async run is
+        already pending.
+        """
+        pass
 
-    def _get_ob(self):
-        assert len(self.frames) == self.k
-        return LazyFrames(list(self.frames))
+    @abstractmethod
+    def step_wait(self):
+        """
+        Wait for the step taken with step_async().
+        Returns (obs, rews, dones, infos):
+         - obs: an array of observations, or a dict of
+                arrays of observations.
+         - rews: an array of rewards
+         - dones: an array of "episode done" booleans
+         - infos: a sequence of info objects
+        """
+        pass
 
-
-class ScaledFloatFrame(gym.ObservationWrapper):
-    def __init__(self, env):
-        gym.ObservationWrapper.__init__(self, env)
-        self.observation_space = gym.spaces.Box(
-            low=0, high=1, shape=env.observation_space.shape,
-            dtype=np.float32)
-
-    def observation(self, observation):
-        # careful! This undoes the memory optimization, use
-        # with smaller replay buffers only.
-        return np.array(observation).astype(np.float32) / 255.0
-
-
-class LazyFrames(object):
-    def __init__(self, frames):
-        self._frames = frames
-        self._out = None
-
-    def _force(self):
-        if self._out is None:
-            self._out = np.concatenate(self._frames, axis=-1)
-            self._frames = None
-        return self._out
-
-    def __array__(self, dtype=None):
-        out = self._force()
-        if dtype is not None:
-            out = out.astype(dtype)
-        return out
-
-    def __len__(self):
-        return len(self._force())
-
-    def __getitem__(self, i):
-        return self._force()[i]
-
-    def count(self):
-        frames = self._force()
-        return frames.shape[frames.ndim - 1]
-
-    def frame(self, i):
-        return self._force()[..., i]
-
-
-def make_atari(env_id, max_episode_steps=None):
-    env = gym.make(env_id)
-    assert 'NoFrameskip' in env.spec.id
-    env = NoopResetEnv(env, noop_max=30)
-    env = MaxAndSkipEnv(env, skip=4)
-    if max_episode_steps is not None:
-        env = TimeLimit(env, max_episode_steps=max_episode_steps)
-    return env
-
-
-def wrap_deepmind(env, episode_life=True, clip_rewards=True,
-                  frame_stack=False, scale=False):
-    """Configure environment for DeepMind-style Atari.
-    """
-    if episode_life:
-        env = EpisodicLifeEnv(env)
-    if 'FIRE' in env.unwrapped.get_action_meanings():
-        env = FireResetEnv(env)
-    env = WarpFrame(env)
-    if scale:
-        env = ScaledFloatFrame(env)
-    if clip_rewards:
-        env = ClipRewardEnv(env)
-    if frame_stack:
-        env = FrameStack(env, 4)
-    return env
-
-
-class Monitor(Wrapper):
-
-    def __init__(self, env, allow_early_resets=False, reset_keywords=(),
-                 info_keywords=()):
-        Wrapper.__init__(self, env=env)
-        self.tstart = time.time()
-        self.results_writer = None
-        self.reset_keywords = reset_keywords
-        self.info_keywords = info_keywords
-        self.allow_early_resets = allow_early_resets
-        self.rewards = None
-        self.needs_reset = True
-        self.episode_rewards = []
-        self.episode_lengths = []
-        self.episode_times = []
-        self.total_steps = 0
-        self.current_reset_info = {}
-
-    def reset(self, **kwargs):
-        self.reset_state()
-        for k in self.reset_keywords:
-            v = kwargs.get(k)
-            if v is None:
-                raise ValueError(f'Expected you to pass kwarg {k} into reset')
-            self.current_reset_info[k] = v
-        return self.env.reset(**kwargs)
-
-    def reset_state(self):
-        if not self.allow_early_resets and not self.needs_reset:
-            raise RuntimeError(
-                "Tried to reset an environment before done. "
-                "If you want to allow early resets, wrap your "
-                "env with Monitor(env, path, allow_early_resets=True)")
-        self.rewards = []
-        self.needs_reset = False
-
-    def step(self, action):
-        if self.needs_reset:
-            raise RuntimeError("Tried to step environment that needs reset")
-        ob, rew, done, info = self.env.step(action)
-        self.update(ob, rew, done, info)
-        return (ob, rew, done, info)
-
-    def update(self, ob, rew, done, info):
-        self.rewards.append(rew)
-        if done:
-            self.needs_reset = True
-            eprew = sum(self.rewards)
-            eplen = len(self.rewards)
-            epinfo = {"r": round(eprew, 6), "l": eplen,
-                      "t": round(time.time() - self.tstart, 6)}
-            for k in self.info_keywords:
-                epinfo[k] = info[k]
-            self.episode_rewards.append(eprew)
-            self.episode_lengths.append(eplen)
-            self.episode_times.append(time.time() - self.tstart)
-            epinfo.update(self.current_reset_info)
-            if self.results_writer:
-                self.results_writer.write_row(epinfo)
-            assert isinstance(info, dict)
-            if isinstance(info, dict):
-                info['episode'] = epinfo
-
-        self.total_steps += 1
+    def close_extras(self):
+        """
+        Clean up the  extra resources, beyond what's in this base class.
+        Only runs when not self.closed.
+        """
+        pass
 
     def close(self):
-        super(Monitor, self).close()
+        if self.closed:
+            return
+        if self.viewer is not None:
+            self.viewer.close()
+        self.close_extras()
+        self.closed = True
+
+    def step(self, actions):
+        """
+        Step the environments synchronously.
+        This is available for backwards compatibility.
+        """
+        self.step_async(actions)
+        return self.step_wait()
+
+    def render(self, mode='human'):
+        imgs = self.get_images()
+        bigimg = tile_images(imgs)
+        if mode == 'human':
+            self.get_viewer().imshow(bigimg)
+            return self.get_viewer().isopen
+        elif mode == 'rgb_array':
+            return bigimg
+        else:
+            raise NotImplementedError
+
+    def get_images(self):
+        """
+        Return RGB images from each environment
+        """
+        raise NotImplementedError
+
+    @property
+    def unwrapped(self):
+        if isinstance(self, VecEnvWrapper):
+            return self.venv.unwrapped
+        else:
+            return self
+
+    def get_viewer(self):
+        if self.viewer is None:
+            from gym.envs.classic_control import rendering
+            self.viewer = rendering.SimpleImageViewer()
+        return self.viewer
+
+
+class VecEnvWrapper(VecEnv):
+    """
+    An environment wrapper that applies to an entire batch
+    of environments at once.
+    """
+
+    def __init__(self, venv, observation_space=None, action_space=None):
+        self.venv = venv
+        super().__init__(
+            num_envs=venv.num_envs,
+            observation_space=observation_space or venv.observation_space,
+            action_space=action_space or venv.action_space)
+
+    def step_async(self, actions):
+        self.venv.step_async(actions)
+
+    @abstractmethod
+    def reset(self):
+        pass
+
+    @abstractmethod
+    def step_wait(self):
+        pass
+
+    def close(self):
+        return self.venv.close()
+
+    def render(self, mode='human'):
+        return self.venv.render(mode=mode)
+
+    def get_images(self):
+        return self.venv.get_images()
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(
+                "attempted to get missing private attribute '{}'".format(name))
+        return getattr(self.venv, name)
+
+
+class VecEnvObservationWrapper(VecEnvWrapper):
+    @abstractmethod
+    def process(self, obs):
+        pass
+
+    def reset(self):
+        obs = self.venv.reset()
+        return self.process(obs)
+
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        return self.process(obs), rews, dones, infos
+
+
+class VecExtractDictObs(VecEnvObservationWrapper):
+    def __init__(self, venv, key):
+        self.key = key
+        super().__init__(
+            venv=venv,
+            observation_space=venv.observation_space.spaces[self.key])
+
+    def process(self, obs):
+        return obs[self.key]
+
+
+def update_mean_var_count_from_moments(mean, var, count, batch_mean,
+                                       batch_var, batch_count):
+    delta = batch_mean - mean
+    tot_count = count + batch_count
+
+    new_mean = mean + delta * batch_count / tot_count
+    m_a = var * count
+    m_b = batch_var * batch_count
+    M2 = m_a + m_b + np.square(delta) * count * batch_count / tot_count
+    new_var = M2 / tot_count
+    new_count = tot_count
+
+    return new_mean, new_var, new_count
+
+
+class RunningMeanStd(object):
+    def __init__(self, epsilon=1e-4, shape=()):
+        self.mean = np.zeros(shape, 'float64')
+        self.var = np.ones(shape, 'float64')
+        self.count = epsilon
+
+    def update(self, x):
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        self.mean, self.var, self.count = update_mean_var_count_from_moments(
+            self.mean, self.var, self.count, batch_mean, batch_var,
+            batch_count)
+
+
+class VecNormalize(VecEnvWrapper):
+    """
+    A vectorized wrapper that normalizes the observations
+    and returns from an environment.
+    """
+
+    def __init__(self, venv, ob=True, ret=True, clipob=10., cliprew=10.,
+                 gamma=0.99, epsilon=1e-8, use_tf=False):
+        VecEnvWrapper.__init__(self, venv)
+        self.ob_rms = RunningMeanStd(
+            shape=self.observation_space.shape) if ob else None
+        self.ret_rms = RunningMeanStd(shape=()) if ret else None
+        self.clipob = clipob
+        self.cliprew = cliprew
+        self.ret = np.zeros(self.num_envs)
+        self.gamma = gamma
+        self.epsilon = epsilon
+
+    def step_wait(self):
+        obs, rews, news, infos = self.venv.step_wait()
+        self.ret = self.ret * self.gamma + rews
+        obs = self._obfilt(obs)
+        if self.ret_rms:
+            self.ret_rms.update(self.ret)
+            rews = np.clip(
+                rews / np.sqrt(self.ret_rms.var + self.epsilon),
+                -self.cliprew, self.cliprew)
+        self.ret[news] = 0.
+        return obs, rews, news, infos
+
+    def _obfilt(self, obs):
+        if self.ob_rms:
+            self.ob_rms.update(obs)
+            obs = np.clip(
+                (obs - self.ob_rms.mean) /
+                np.sqrt(self.ob_rms.var + self.epsilon),
+                -self.clipob, self.clipob)
+            return obs
+        else:
+            return obs
+
+    def reset(self):
+        self.ret = np.zeros(self.num_envs)
+        obs = self.venv.reset()
+        return self._obfilt(obs)
+
+
+class TransposeImage(VecEnvWrapper):
+    def __init__(self, env=None, op=[2, 0, 1]):
+        """
+        Transpose observation space for images
+        """
+        VecEnvWrapper.__init__(self, env)
+        self.op = op
+        obs_shape = self.observation_space.shape
+        self.observation_space = Box(
+            self.observation_space.low[0, 0, 0, 0],
+            self.observation_space.high[0, 0, 0, 0],
+            [
+                obs_shape[self.op[1]],
+                obs_shape[self.op[2]], obs_shape[self.op[3]]
+            ],
+            dtype=self.observation_space.dtype)
+
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        return obs.transpose(0, 3, 1, 2), rews, dones, infos
+
+    def reset(self):
+        obs = self.venv.reset()
+        return obs.transpose(0, 3, 1, 2)
+
+
+class VecPyTorch(VecEnvWrapper):
+    def __init__(self, venv, device):
+        """Return only every `skip`-th frame"""
+        super(VecPyTorch, self).__init__(venv)
+        self.device = device
+
+    def reset(self):
+        obs = self.venv.reset()
+        obs = torch.from_numpy(obs).float().to(self.device)
+        return obs
+
+    def step_async(self, actions):
+        if isinstance(actions, torch.Tensor):
+            if actions.is_cuda:
+                actions = actions.cpu()
+            actions = actions.numpy()
+
+        self.venv.step_async(actions.astype(np.float32).flatten())
+
+    def step_wait(self):
+        obs, reward, done, info = self.venv.step_wait()
+        obs = torch.from_numpy(obs).float().to(self.device)
+        reward = torch.from_numpy(reward).unsqueeze(dim=1).float()
+        done = torch.from_numpy(done).unsqueeze(dim=1)
+        return obs, reward, done, info
+
+
+class VecPyTorchFrameStack(VecEnvWrapper):
+    def __init__(self, venv, nstack, device=None):
+        super(VecPyTorchFrameStack, self).__init__(venv)
+        self.nstack = nstack
+
+        wos = venv.observation_space
+        self.shape_dim0 = wos.shape[0]
+
+        low = np.repeat(wos.low, self.nstack, axis=0)
+        high = np.repeat(wos.high, self.nstack, axis=0)
+
+        if device is None:
+            device = torch.device('cpu')
+        self.stacked_obs = torch.zeros(
+            (venv.num_envs, ) + low.shape).to(device)
+
+        self.observation_space = gym.spaces.Box(
+            low=low, high=high, dtype=venv.observation_space.dtype)
+
+    def step_wait(self):
+        obs, rews, dones, infos = self.venv.step_wait()
+        self.stacked_obs[:, :-self.shape_dim0] = \
+            self.stacked_obs[:, self.shape_dim0:].clone()
+        for (i, done) in enumerate(dones):
+            if done:
+                self.stacked_obs[i] = 0
+        self.stacked_obs[:, -self.shape_dim0:] = obs
+        return self.stacked_obs, rews, dones, infos
+
+    def reset(self):
+        obs = self.venv.reset()
+        if torch.backends.cudnn.deterministic:
+            self.stacked_obs = torch.zeros(self.stacked_obs.shape)
+        else:
+            self.stacked_obs.zero_()
+        self.stacked_obs[:, -self.shape_dim0:] = obs
+        return self.stacked_obs
+
+    def close(self):
+        self.venv.close()

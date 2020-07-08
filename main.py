@@ -3,8 +3,9 @@ import argparse
 import yaml
 import torch
 from datetime import datetime
+from rltorch2_ppo.env.procgen_env_wrapper import ProcgenEnvWrapper
+from rltorch2_ppo.env.my_env import MyEnv
 
-from rltorch2_ppo.env import make_vec_envs
 from rltorch2_ppo.agent import PPO
 
 
@@ -18,8 +19,8 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Make vectorized environment.
-    envs = make_vec_envs(
-        args.env_id, args.seed, args.num_processes, device, False)
+    envs = ProcgenEnvWrapper()
+    # envs = MyEnv()
 
     # Specify the directory to log.
     time = datetime.now().strftime("%Y%m%d-%H%M")
@@ -38,7 +39,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='RL')
     parser.add_argument('--config', type=str, default='config/ppo.yaml')
-    parser.add_argument('--env_id', default='BreakoutNoFrameskip-v4')
+    parser.add_argument('--env_id', default='procgen:procgen-coinrun-v0')
     parser.add_argument('--num_processes', type=int, default=8)
     parser.add_argument('--log_dir', default='logs/ppo')
     parser.add_argument('--seed', type=int, default=0)
