@@ -43,7 +43,7 @@ def make_env(env_id, seed, rank, allow_early_resets):
         # if log_dir is not None:
         env = Monitor(env, allow_early_resets=allow_early_resets)
 
-        env = wrap_deepmind(env)
+        env = wrap_deepmind(env, clip_rewards=False)
 
         # If the input has shape (W,H,3), wrap for PyTorch convolutions
         obs_shape = env.observation_space.shape

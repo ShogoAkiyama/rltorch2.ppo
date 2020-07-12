@@ -80,13 +80,14 @@ class RolloutStorage(object):
 
             for indices in sampler:
                 states = self.states[:-1].view(-1, *self.img_shape)[indices]
+                next_states = self.states[1:].view(-1, *self.img_shape)[indices]
                 actions = self.actions.view(-1, self.actions.size(-1))[indices]
                 pred_values = self.pred_values[:-1].view(-1, 1)[indices]
                 target_values = self.target_values.view(-1, 1)[indices]
                 action_log_probs = self.action_log_probs.view(-1, 1)[indices]
                 advs = all_advs.view(-1, 1)[indices]
 
-                yield states, actions, pred_values, \
+                yield states, next_states, actions, pred_values, \
                     target_values, action_log_probs, advs
 
         self.states[0].copy_(self.states[-1])

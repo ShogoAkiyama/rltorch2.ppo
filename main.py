@@ -38,7 +38,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='RL')
     parser.add_argument('--config', type=str, default='config/ppo.yaml')
-    parser.add_argument('--env_id', default='BreakoutNoFrameskip-v4')
+    parser.add_argument('--env_id', default='PongNoFrameskip-v4')
     parser.add_argument('--num_processes', type=int, default=8)
     parser.add_argument('--log_dir', default='logs/ppo')
     parser.add_argument('--seed', type=int, default=0)

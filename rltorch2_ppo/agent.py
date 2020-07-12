@@ -71,6 +71,13 @@ class PPO:
         self.episode_r = [[] for _ in range(num_processes)]
         self.episode_rewards = deque(maxlen=10)
 
+        self.beta = 0.2
+        self.dist_entropy = 0
+        self.loss_policy = 0
+        self.loss_value = 0
+        self.loss_forward = 0
+        self.loss_inverse = 0
+
     def run(self):
         states = self.envs.reset()
         self.storage.init_states(states)
@@ -82,16 +89,21 @@ class PPO:
 
             for _ in range(self.unroll_length):
                 with torch.no_grad():
-                    values, actions, action_log_probs = self.network(states)
+                    values, actions, action_log_probs, action_probs = self.network(states)
                 next_states, rewards, dones, infos = self.envs.step(actions)
 
                 for info in infos:
                     if 'episode' in info.keys():
                         self.episode_rewards.append(info['episode']['r'])
 
+                with torch.no_grad():
+                    bonus = self.network.get_bonus(
+                            states, next_states, action_probs.data)
+                rewards = (rewards + bonus.data.cpu())
+
                 self.storage.insert(
-                    next_states, actions, rewards, dones, action_log_probs,
-                    values)
+                    next_states, actions.data, rewards, dones,
+                    action_log_probs.data, values.data)
 
                 states = next_states
 
@@ -104,36 +116,43 @@ class PPO:
             if len(self.episode_rewards) > 1:
                 total_steps = \
                     (step + 1) * self.num_processes * self.unroll_length
-                print(f"\rSteps: {total_steps}   "
-                      f"Updates: {step}   "
-                      f"Mean Return: {np.mean(self.episode_rewards)}", end='')
+                print(f"\rSteps: {total_steps}  "
+                      f"Updates: {step}  "
+                      f"Mean Return: {np.mean(self.episode_rewards)}  ",
+                      f"entropy: {self.dist_entropy}  ",
+                      f"Policy Loss: {self.loss_policy}  ",
+                      f"Value Loss: {self.loss_value}  ",
+                      f"Foward Loss: {self.loss_forward}  ",
+                      f"Inverse Loss: {self.loss_inverse}  ",
+                      end='')
                 self.writer.add_scalar(
                     'return/train', np.mean(self.episode_rewards),
                     total_steps)
 
     def update(self):
         for sample in self.storage.iterate(self.num_gradient_steps):
-            states, actions, pred_values, \
+            states, next_states, actions, pred_values, \
                 target_values, log_probs_old, advs = sample
 
             # Reshape to do in a single forward pass for all steps.
-            values, action_log_probs, dist_entropy = \
+            values, action_log_probs, dist_entropy, action_probs = \
                 self.network.evaluate_actions(states, actions)
 
             ratio = torch.exp(action_log_probs - log_probs_old)
 
             loss_policy = -torch.min(ratio * advs, torch.clamp(
-                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advs
-            ).mean()
+                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advs).mean()
 
-            value_pred_clipped = pred_values + (
-                values - pred_values
-            ).clamp(-self.clip_param, self.clip_param)
+            loss_value = (values - target_values).pow(2).mean()
 
-            loss_value = 0.5 * torch.max(
-                (values - target_values).pow(2),
-                (value_pred_clipped - target_values).pow(2)
-            ).mean()
+            # value_pred_clipped = pred_values + (
+            #     values - pred_values
+            # ).clamp(-self.clip_param, self.clip_param)
+
+            # loss_value = 0.5 * torch.max(
+            #     (values - target_values).pow(2),
+            #     (value_pred_clipped - target_values).pow(2)
+            # ).mean()
 
             self.optimizer.zero_grad()
             loss = (
@@ -141,10 +160,22 @@ class PPO:
                 + self.value_loss_coef * loss_value
                 - self.entropy_coef * dist_entropy
             )
+
+            loss_inverse, loss_forward = self.network.get_icm_loss(
+                states, next_states, actions, action_probs.data)
+
+            loss += ((1 - self.beta) * loss_inverse + self.beta * loss_forward) * 10
+
             loss.backward()
             nn.utils.clip_grad_norm_(
                 self.network.parameters(), self.max_grad_norm)
             self.optimizer.step()
+
+            self.dist_entropy = dist_entropy.item()
+            self.loss_policy = loss_policy.item()
+            self.loss_value = loss_value.item()
+            self.loss_forward = loss_forward.item()
+            self.loss_inverse = loss_inverse.item()
 
     def save_models(self, filename):
         torch.save(
